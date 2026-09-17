@@ -1,0 +1,137 @@
+diff --git a/compile-kernel/tools/script/docker/build_armbian_rootfs_file.sh b/compile-kernel/tools/script/docker/build_armbian_rootfs_file.sh
+index b48ee8b..fdd6f95 100755
+--- a/compile-kernel/tools/script/docker/build_armbian_rootfs_file.sh
++++ b/compile-kernel/tools/script/docker/build_armbian_rootfs_file.sh
+@@ -278,6 +278,132 @@ EOF
+     # Rename Armbian image
+     if [[ -n "${image_file}" ]]; then
+         cd ${image_path}/
++        # Slim: remove docs, locales, qcom firmware, apt cache (non-fatal, sub-shell isolated)
++        (
++        IMAGE_FILE="${image_path}/${image_file}"
++        if [ -z "${IMAGE_FILE}" ] || [ ! -f "${IMAGE_FILE}" ]; then
++            echo -e "${WARNING} Image file ${IMAGE_FILE} not found, skipping" >&2
++            exit 0
++        fi
++
++        echo -e "${STEPS} Start slimming trunk image(S905D optimized): $(basename "${IMAGE_FILE}")"
++
++        SLIM_MOUNT="$(mktemp -d -t slim_mount_XXXXXX)"
++        trap "sudo rm -rf ${SLIM_MOUNT}" EXIT
++
++        LOOP_DEV=$(sudo losetup -Pf --show "${IMAGE_FILE}" 2>/dev/null)
++        if [ -z "${LOOP_DEV}" ] || [ ! -b "${LOOP_DEV}" ]; then
++            echo -e "${WARNING} Loop device setup failed, skipping slimming." >&2
++            exit 0
++        fi
++
++        PART_LIST=$(lsblk -ln -o NAME,TYPE "${LOOP_DEV}" 2>/dev/null | grep part | awk '{print $1}')
++        FOUND_ROOTFS=""
++        for PART in ${PART_LIST}; do
++            PART_PATH="/dev/${PART}"
++            echo -e "${INFO} Trying to mount: ${PART_PATH}"
++            if sudo mount "${PART_PATH}" "${SLIM_MOUNT}" 2>/dev/null; then
++                if [ -d "${SLIM_MOUNT}/etc" ] && [ -d "${SLIM_MOUNT}/usr" ]; then
++                    FOUND_ROOTFS="${PART_PATH}"
++                    sudo umount "${SLIM_MOUNT}" 2>/dev/null
++                    echo -e "${INFO} Rootfs partition identified: ${PART_PATH}"
++                    break
++                else
++                    sudo umount "${SLIM_MOUNT}" 2>/dev/null
++                    echo -e "${INFO} ${PART_PATH} is not rootfs (missing /etc or /usr)"
++                fi
++            else
++                echo -e "${WARNING} Cannot mount ${PART_PATH}, skipping"
++            fi
++        done
++
++        if [ -z "${FOUND_ROOTFS}" ]; then
++            echo -e "${WARNING} No rootfs partition found, skipping slimming." >&2
++            sudo losetup -d "${LOOP_DEV}" 2>/dev/null
++            exit 0
++        fi
++
++        sudo mount "${FOUND_ROOTFS}" "${SLIM_MOUNT}" 2>/dev/null
++        if [ $? -ne 0 ]; then
++            echo -e "${WARNING} Mount failed, skipping slimming." >&2
++            sudo losetup -d "${LOOP_DEV}" 2>/dev/null
++            exit 0
++        fi
++
++        BEFORE_TOTAL=$(sudo du -sh "${SLIM_MOUNT}" 2>/dev/null | awk '{print $1}')
++        echo -e "${INFO} Rootfs size before slimming: ${BEFORE_TOTAL}"
++
++        # 1. Remove static documentation
++        if [ -d "${SLIM_MOUNT}/usr/share/doc" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/usr/share/doc" 2>/dev/null | awk '{print $1}')
++            sudo rm -rf "${SLIM_MOUNT}/usr/share/doc"
++            echo -e "${INFO} Removed /usr/share/doc (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /usr/share/doc not found, skipping"
++        fi
++
++        if [ -d "${SLIM_MOUNT}/usr/share/man" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/usr/share/man" 2>/dev/null | awk '{print $1}')
++            sudo rm -rf "${SLIM_MOUNT}/usr/share/man"
++            echo -e "${INFO} Removed /usr/share/man (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /usr/share/man not found, skipping"
++        fi
++
++        if [ -d "${SLIM_MOUNT}/usr/share/info" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/usr/share/info" 2>/dev/null | awk '{print $1}')
++            sudo rm -rf "${SLIM_MOUNT}/usr/share/info"
++            echo -e "${INFO} Removed /usr/share/info (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /usr/share/info not found, skipping"
++        fi
++
++        # 2. Keep only en* and zh* locales
++        if [ -d "${SLIM_MOUNT}/usr/share/locale" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/usr/share/locale" 2>/dev/null | awk '{print $1}')
++            sudo find "${SLIM_MOUNT}/usr/share/locale" -mindepth 1 -maxdepth 1 -type d ! -name 'en*' ! -name 'zh*' -exec rm -rf {} +
++            echo -e "${INFO} Cleaned locales (kept en and zh only) (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /usr/share/locale not found, skipping"
++        fi
++
++        # 3. Remove Qualcomm firmware (qcom)
++        if [ -d "${SLIM_MOUNT}/usr/lib/firmware/qcom" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/usr/lib/firmware/qcom" 2>/dev/null | awk '{print $1}')
++            sudo rm -rf "${SLIM_MOUNT}/usr/lib/firmware/qcom"
++            echo -e "${INFO} Removed /usr/lib/firmware/qcom, for Amlogic S905D only (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /usr/lib/firmware/qcom not found, skipping"
++        fi
++
++        # 4. Clear APT package lists
++        if [ -d "${SLIM_MOUNT}/var/lib/apt/lists" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/var/lib/apt/lists" 2>/dev/null | awk '{print $1}')
++            sudo rm -rf "${SLIM_MOUNT}/var/lib/apt/lists/*"
++            echo -e "${INFO} Cleaned /var/lib/apt/lists (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /var/lib/apt/lists not found, skipping"
++        fi
++
++        # 5. Clear APT package cache
++        if [ -d "${SLIM_MOUNT}/var/cache/apt" ]; then
++            SIZE_BEFORE=$(sudo du -sh "${SLIM_MOUNT}/var/cache/apt" 2>/dev/null | awk '{print $1}')
++            sudo rm -rf "${SLIM_MOUNT}/var/cache/apt/*"
++            echo -e "${INFO} Cleaned /var/cache/apt (freed: ${SIZE_BEFORE})"
++        else
++            echo -e "${WARNING} /var/cache/apt not found, skipping"
++        fi
++
++        AFTER_TOTAL=$(sudo du -sh "${SLIM_MOUNT}" 2>/dev/null | awk '{print $1}')
++        echo -e "${INFO} Rootfs size after slimming: ${AFTER_TOTAL}"
++
++        sudo umount "${SLIM_MOUNT}" 2>/dev/null
++        sudo losetup -d "${LOOP_DEV}" 2>/dev/null
++        sudo rm -rf "${SLIM_MOUNT}" 2>/dev/null
++
++        echo -e "${SUCCESS} Trunk image slimming completed."
++        exit 0
++        ) || true
+         mv -f ${image_file} ${image_save_name}
+         pigz -qf *.img || gzip -qf *.img
+         [[ "${?}" == "0" ]] && echo -e "${INFO} 08. Armbian image renamed successfully." || error_msg "08. Failed to rename the image!"
