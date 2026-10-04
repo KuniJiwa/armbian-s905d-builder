@@ -50,7 +50,7 @@ on:
         type: string
       action_commit:
         description: "Set the ophub action baseline commit."
-        default: "c708ef8625320abc0a0a983e6b9a0f831fb389d1"
+        default: "820f6dd87540bddb100ba6afd042227ba365b3f1"
         type: string
 
 env:
@@ -117,8 +117,16 @@ jobs:
         run: |
           git clone https://github.com/ophub/amlogic-s9xxx-armbian custom
           cd custom
-          git checkout ${{ inputs.action_commit || 'c708ef8625320abc0a0a983e6b9a0f831fb389d1' }}
-          git apply --whitespace=nowarn $GITHUB_WORKSPACE/armbian-slim.patch
+          git fetch origin
+          FALLBACK="${{ inputs.action_commit }}"
+          if git apply --check --whitespace=nowarn $GITHUB_WORKSPACE/armbian-slim.patch 2>/dev/null; then
+            echo "Patch applied on latest: $(git rev-parse HEAD)"
+            git apply --whitespace=nowarn $GITHUB_WORKSPACE/armbian-slim.patch
+          else
+            echo "Patch failed on latest, fallback to: ${FALLBACK}"
+            git checkout ${FALLBACK}
+            git apply --whitespace=nowarn $GITHUB_WORKSPACE/armbian-slim.patch
+          fi
           ln -sf /builder/build ${{ github.workspace }}/custom/build
 
       - name: Compile Armbian [ ${{ inputs.set_release || 'bookworm' }} ]
